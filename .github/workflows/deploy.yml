@@ -56,13 +56,6 @@ jobs:
           only-severities: critical,high
           exit-code: false
 
-      - name: Docker Scout Policy
-        uses: docker/scout-action@v1
-        with:
-          command: policy
-          image: s225405862/user-service:${{ github.sha }}
-          exit-code: false
-
       - name: Push to Docker Hub
         run: |
           docker push s225405862/user-service:${{ github.sha }}
