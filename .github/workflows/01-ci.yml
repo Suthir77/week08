@@ -1,4 +1,4 @@
-﻿name: 01 - CI
+name: 01 - CI
 
 on:
   push:
@@ -11,6 +11,63 @@ on:
 
 
 jobs:
+
+  # =========================================================
+  # Infrastructure as Code
+  # Terraform creates the resource group, ACR, AKS cluster
+  # and storage account that the rest of the pipeline uses.
+  # =========================================================
+  terraform:
+    name: Terraform Provision Infrastructure
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Load Azure credentials for Terraform
+        working-directory: .
+        env:
+          AZURE_CREDS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          CLIENT_SECRET=$(echo "$AZURE_CREDS" | jq -r .clientSecret)
+          echo "::add-mask::$CLIENT_SECRET"
+          echo "ARM_CLIENT_ID=$(echo "$AZURE_CREDS" | jq -r .clientId)" >> "$GITHUB_ENV"
+          echo "ARM_CLIENT_SECRET=$CLIENT_SECRET" >> "$GITHUB_ENV"
+          echo "ARM_TENANT_ID=$(echo "$AZURE_CREDS" | jq -r .tenantId)" >> "$GITHUB_ENV"
+          echo "ARM_SUBSCRIPTION_ID=$(echo "$AZURE_CREDS" | jq -r .subscriptionId)" >> "$GITHUB_ENV"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -input=false -out=tfplan
+
+      # Pull requests only plan. Infrastructure changes on main.
+      - name: Terraform Apply
+        if: github.event_name != 'pull_request'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Show Terraform outputs
+        if: github.event_name != 'pull_request'
+        run: terraform output
+
 
   # =========================================================
   # Backend Tests
@@ -103,16 +160,17 @@ jobs:
 
 
   # =========================================================
-  # Build and Push Docker Images
+  # Build, Scan and Push Docker Images
+  # Every image is scanned by Docker Scout before it can be
+  # pushed to the registry that Terraform created.
   # =========================================================
-  build-and-push:
-    name: Build and Push ${{ matrix.image }}
+  build-scan-push:
+    name: Build, Scan and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
 
     needs:
+      - terraform
       - backend-test
-
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
 
     strategy:
       fail-fast: false
@@ -137,6 +195,9 @@ jobs:
           - service: enrollment-service
             image: koalatech-enrollment-service
 
+    env:
+      IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+
     steps:
 
       - name: Checkout repository
@@ -155,10 +216,48 @@ jobs:
         run: |
           docker build \
             --platform linux/amd64 \
-            -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
+            -t "$IMAGE" \
             ./${{ matrix.service }}
+
+      # Docker Scout needs a Docker Hub login to download its CVE database.
+      - name: Login to Docker Hub for Docker Scout
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # Report: every critical and high CVE, published on the run summary
+      # and saved as a SARIF file.
+      - name: Docker Scout CVE report
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ env.IMAGE }}
+          only-severities: critical,high
+          summary: true
+          write-comment: false
+          sarif-file: scout-${{ matrix.image }}.sarif
+          exit-code: false
+
+      - name: Upload Docker Scout report
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-${{ matrix.image }}
+          path: scout-${{ matrix.image }}.sarif
+
+      # Gate: a critical CVE that already has a fix available stops the
+      # job here, so the image is never pushed.
+      - name: Docker Scout security gate
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ env.IMAGE }}
+          only-severities: critical
+          only-fixed: true
+          summary: false
+          write-comment: false
+          exit-code: true
 
       - name: Push Docker image with commit SHA
         run: |
-          docker push \
-            ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          docker push "$IMAGE"

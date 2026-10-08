@@ -1,0 +1,23 @@
+# Values for the kube-prometheus-stack Helm chart.
+
+prometheus:
+  prometheusSpec:
+    # Pick up every ServiceMonitor and rule in the cluster, including
+    # the KoalaTech one, instead of only the ones shipped with the chart.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# AKS manages the control plane, so these components cannot be scraped.
+# Leaving them enabled only produces permanently failing targets.
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeProxy:
+  enabled: false

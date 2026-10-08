@@ -14,8 +14,7 @@ jobs:
     name: Staging Smoke Test
     runs-on: ubuntu-latest
 
-    if: >
-      ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: github.event.workflow_run.conclusion == 'success'
 
     environment:
       name: staging
@@ -61,3 +60,35 @@ jobs:
             --retry 10 \
             --retry-delay 5 \
             http://${{ env.FRONTEND_IP }}
+
+      # The application is only considered healthy in staging when
+      # Prometheus is actually scraping all five backend services.
+      - name: Test application monitoring
+        run: |
+          kubectl port-forward \
+            -n monitoring \
+            svc/prometheus-kube-prometheus-prometheus \
+            9090:9090 > /dev/null 2>&1 &
+
+          sleep 5
+
+          for i in {1..30}; do
+
+            UP_COUNT=$(curl -sG http://localhost:9090/api/v1/query \
+              --data-urlencode 'query=count(up{namespace="staging",job=~".*-service"} == 1)' \
+              | jq -r '.data.result[0].value[1] // "0"')
+
+            echo "Backend services scraped by Prometheus: ${UP_COUNT:-0} of 5"
+
+            if [ "${UP_COUNT:-0}" = "5" ]; then
+              curl -sG http://localhost:9090/api/v1/query \
+                --data-urlencode 'query=up{namespace="staging",job=~".*-service"}' \
+                | jq -r '.data.result[] | "\(.metric.job)  up=\(.value[1])"'
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "Prometheus is not scraping all five backend services."
+          exit 1

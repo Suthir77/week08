@@ -1,4 +1,4 @@
-﻿name: 04 - Deploy to Production
+name: 04 - Deploy to Production
 
 on:
   pull_request:
@@ -46,6 +46,22 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      - name: Read storage connection string from Azure
+        run: |
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --query "[0].name" \
+            -o tsv)
+
+          STORAGE_CONNECTION_STRING=$(az storage account show-connection-string \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name "$STORAGE_ACCOUNT" \
+            --query connectionString \
+            -o tsv)
+
+          echo "::add-mask::$STORAGE_CONNECTION_STRING"
+          echo "STORAGE_CONNECTION_STRING=$STORAGE_CONNECTION_STRING" >> "$GITHUB_ENV"
+
       - name: Create application secret
         run: |
           kubectl create secret generic application-secret \
@@ -56,7 +72,7 @@ jobs:
             --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
             --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
             --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONNECTION_STRING" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
